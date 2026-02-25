@@ -8,6 +8,7 @@ dependencies = [
     "chromadb>=1.5.1",
     "langchain>=1.2.10",
     "langchain-community>=0.4.1",
+    "langchain-experimental>=0.4.1",
     "langchain-google-genai>=4.2.1",
     "langchain-huggingface>=1.2.0",
     "python-dotenv>=1.2.1",

@@ -3,7 +3,7 @@ import sys
 import shutil
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_experimental.text_splitter import SemanticChunker
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
@@ -39,20 +39,25 @@ def main():
         print("読み込むドキュメントが見つかりませんでした。")
         return
 
-    # 2. テキストの分割 (Chunking)
-    # 条文を壊さないよう、少し大きめのサイズでオーバーラップを持たせる
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", "。"]
-    )
-    chunks = text_splitter.split_documents(all_documents)
-    print(f"分割後のチャンク数: {len(chunks)}")
-
-    # 3. ベクトル化 (Embedding)
+    # 2. ベクトル化 (Embedding) ← Semantic Chunkerが内部で使用するため先に定義
     embeddings = HuggingFaceEmbeddings(
         model_name="intfloat/multilingual-e5-small"
     )
+
+    # 3. テキストの分割 (Semantic Chunking)
+    # 埋め込みベクトルの類似度変化を見て、意味的な切れ目でテキストを分割する
+    # breakpoint_threshold_type:
+    #   "percentile"  : 類似度変化が上位95パーセンタイルの箇所で切る（デフォルト）
+    #   "standard_deviation": 標準偏差を超える変化点で切る
+    #   "interquartile" : 四分位範囲を超える変化点で切る
+    text_splitter = SemanticChunker(
+        embeddings,
+        breakpoint_threshold_type="percentile",
+        breakpoint_threshold_amount=95,  # 類似度変化の上位5%を分割点とする
+    )
+    chunks = text_splitter.split_documents(all_documents)
+    print(f"セマンティック分割後のチャンク数: {len(chunks)}")
+
 
     # 4. ベクターDB (Chroma) に保存
     # --reset が指定されていた場合は新規作成、そうでなければ既存に追加
