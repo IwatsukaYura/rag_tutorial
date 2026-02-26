@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import argparse
 import json
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -50,12 +51,11 @@ def parse_test_set(file_path):
             
     return test_cases
 
-def get_rag_chain():
-    persist_directory = "./chroma_db"
+def get_rag_chain(db_path: str):
     embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-small")
-    
+
     vector_db = Chroma(
-        persist_directory=persist_directory,
+        persist_directory=db_path,
         embedding_function=embeddings
     )
     retriever = vector_db.as_retriever(search_kwargs={"k": 3})
@@ -141,65 +141,105 @@ def evaluate_retrieval(expected_evidence, retrieved_docs):
     else:
         return 0, f"No expected sources found. Expected: {expected_files}, Got: {retrieved_sources}"
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="RAGシステム評価スクリプト")
+    parser.add_argument(
+        "--db-path",
+        default=os.getenv("VECTOR_DB_PATH", "./chroma_db"),
+        help="評価対象のChromaDBパス (default: 環境変数VECTOR_DB_PATHまたは./chroma_db)"
+    )
+    parser.add_argument(
+        "--output",
+        default="eval_results.json",
+        help="評価結果の出力JSONファイル名 (default: eval_results.json)"
+    )
+    return parser.parse_args()
+
 def main():
+    args = parse_args()
+    print(f"評価対象DB: {args.db_path}")
+    print(f"結果出力先: {args.output}")
     test_cases = parse_test_set("qa_test_set.txt")
-    rag_chain = get_rag_chain()
+    rag_chain = get_rag_chain(args.db_path)
     eval_llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0)
     
     results = []
     print(f"--- 評価開始 (全{len(test_cases)}問) ---")
-    
+
     for case in test_cases:
         print(f"Evaluating {case['id']}...")
-        try:
-            response = rag_chain.invoke({"input": case['question']})
-            time.sleep(5)  # Rate limit protection
-            
-            gen_score, gen_reason = evaluate_generation(
-                eval_llm, 
-                case['question'], 
-                case['expected_answer'], 
-                response['answer']
-            )
-            time.sleep(5)  # Rate limit protection
-            
-            ret_score, ret_reason = evaluate_retrieval(
-                case['expected_evidence'], 
-                response['context']
-            )
-            
-            res = {
-                "id": case['id'],
-                "gen_score": gen_score,
-                "ret_score": ret_score,
-                "gen_reason": gen_reason,
-                "ret_reason": ret_reason
-            }
-            results.append(res)
-            
-            # 中間結果を保存
-            with open("eval_results_temp.json", "w", encoding="utf-8") as f:
-                json.dump(results, f, ensure_ascii=False, indent=2)
-                
-        except Exception as e:
-            print(f"Error evaluating {case['id']}: {e}")
-            if "RESOURCE_EXHAUSTED" in str(e):
-                print("Rate limit reached. Sleeping for 30s...")
-                time.sleep(30)
-                # リトライロジックは簡略化のため無し
-            continue
-        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                response = rag_chain.invoke({"input": case['question']})
+                time.sleep(5)  # Rate limit protection
+
+                gen_score, gen_reason = evaluate_generation(
+                    eval_llm,
+                    case['question'],
+                    case['expected_answer'],
+                    response['answer']
+                )
+                time.sleep(5)  # Rate limit protection
+
+                ret_score, ret_reason = evaluate_retrieval(
+                    case['expected_evidence'],
+                    response['context']
+                )
+
+                res = {
+                    "id": case['id'],
+                    "gen_score": gen_score,
+                    "ret_score": ret_score,
+                    "gen_reason": gen_reason,
+                    "ret_reason": ret_reason
+                }
+                results.append(res)
+
+                # 中間結果を保存
+                with open(args.output, "w", encoding="utf-8") as f:
+                    json.dump(results, f, ensure_ascii=False, indent=2)
+
+                break  # 成功したらリトライループを抜ける
+
+            except Exception as e:
+                print(f"Error evaluating {case['id']} (attempt {attempt + 1}/{max_retries}): {e}")
+                if "RESOURCE_EXHAUSTED" in str(e):
+                    wait_sec = 60
+                    print(f"Rate limit reached. Sleeping for {wait_sec}s...")
+                    time.sleep(wait_sec)
+                    if attempt + 1 == max_retries:
+                        print(f"  -> {case['id']} をスキップします。")
+                else:
+                    print(f"  -> {case['id']} をスキップします。")
+                    break
+
     # 集計
+    if not results:
+        print("\n評価できた問題が0件でした。レート制限を超えた可能性があります。")
+        print(f"時間をおいてから再実行してください。")
+        return
+
     avg_gen = sum(r['gen_score'] for r in results) / len(results)
     avg_ret = sum(r['ret_score'] for r in results) / len(results)
-    
-    print("\n--- 評価結果サマリー ---")
+
+    summary = {
+        "db_path": args.db_path,
+        "avg_gen_score": round(avg_gen, 3),
+        "avg_ret_score": round(avg_ret, 3),
+        "results": results
+    }
+    with open(args.output, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"\n評価結果を保存しました: {args.output}")
+
+    print(f"\n--- 評価結果サマリー ({len(results)}/{len(test_cases)}問 完了) ---")
     print(f"Generation平均スコア: {avg_gen:.2f} / 3.0")
     print(f"Retrieval平均スコア: {avg_ret:.2f} / 3.0")
     print("\n詳細:")
     for r in results:
         print(f"[{r['id']}] Ret: {r['ret_score']}, Gen: {r['gen_score']}")
-        print(f"  Gen Reason: {r['gen_reason'].split('\n')[0]}...")
+        print(f"  Gen Reason: {r['gen_reason'].split(chr(10))[0]}...")
 
 if __name__ == "__main__":
     main()
