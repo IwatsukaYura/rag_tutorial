@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import argparse
+from typing import List
 from dotenv import load_dotenv
 from langchain_community.document_loaders import TextLoader
 from langchain_experimental.text_splitter import SemanticChunker
@@ -12,7 +13,7 @@ from langchain_community.vectorstores import Chroma
 # .envから設定を読み込み
 load_dotenv()
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="RAGチュートリアル: ドキュメントのベクターDB化")
     parser.add_argument(
         "--chunking",
@@ -35,7 +36,7 @@ def parse_args():
     parser.add_argument("--chunk-overlap", type=int, default=50, help="チャンクオーバーラップ (fixed時のみ, default: 50)")
     return parser.parse_args()
 
-def main():
+def main() -> None:
     args = parse_args()
 
     # DB パス: CLI引数 > 環境変数 > デフォルト

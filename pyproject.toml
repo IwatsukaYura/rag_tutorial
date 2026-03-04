@@ -13,4 +13,5 @@ dependencies = [
     "langchain-huggingface>=1.2.0",
     "python-dotenv>=1.2.1",
     "sentence-transformers>=5.2.3",
+    "flashrank<=0.2.10",
 ]

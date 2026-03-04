@@ -9,7 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
 
-def main():
+def main() -> None:
     persist_directory = "./chroma_db"
     embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-small")
     
@@ -61,7 +61,11 @@ def main():
             continue
 
         print("検索中...")
-        response = rag_chain.invoke({"input": query})
+        try:
+            response = rag_chain.invoke({"input": query})
+        except Exception as e:
+            print(f"エラーが発生しました: {e}")
+            continue
 
         # 5. 結果の表示
         print("\n【回答】")

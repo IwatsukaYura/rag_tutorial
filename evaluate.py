@@ -3,17 +3,18 @@ import re
 import time
 import argparse
 import json
+from typing import List, Dict, Tuple, Any
 from dotenv import load_dotenv
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
 
-def parse_test_set(file_path):
+def parse_test_set(file_path: str) -> List[Dict[str, str]]:
     with open(file_path, 'r', encoding='utf-8') as f:
         content = f.read()
     
@@ -51,7 +52,7 @@ def parse_test_set(file_path):
             
     return test_cases
 
-def get_rag_chain(db_path: str):
+def get_rag_chain(db_path: str) -> Tuple[Any, Any]:
     embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-small")
 
     vector_db = Chroma(
@@ -75,11 +76,20 @@ def get_rag_chain(db_path: str):
         ("human", "{input}"),
     ])
 
-    question_answer_chain = create_stuff_documents_chain(llm, prompt)
-    rag_chain = create_retrieval_chain(retriever, question_answer_chain)
-    return rag_chain
+    # LCEL方式でRAGチェーンを構築
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+    
+    rag_chain = (
+        {"context": retriever | format_docs, "input": RunnablePassthrough()}
+        | prompt
+        | llm
+        | StrOutputParser()
+    )
+    
+    return rag_chain, retriever
 
-def evaluate_generation(llm, question, expected, generated):
+def evaluate_generation(llm: Any, question: str, expected: str, generated: str) -> Tuple[int, str]:
     eval_prompt = f"""
 以下のRAGシステムの回答を、期待される正解と比較して0-3点で採点してください。
 
@@ -109,7 +119,7 @@ Reason: [理由]
     
     return score, reason
 
-def evaluate_retrieval(expected_evidence, retrieved_docs):
+def evaluate_retrieval(expected_evidence: str, retrieved_docs: List[Any]) -> Tuple[int, str]:
     # 文書名が含まれているか簡易チェック (DOC-001 -> doc_01)
     retrieved_sources = [doc.metadata.get('source', '') for doc in retrieved_docs]
     
@@ -155,12 +165,12 @@ def parse_args():
     )
     return parser.parse_args()
 
-def main():
+def main() -> None:
     args = parse_args()
     print(f"評価対象DB: {args.db_path}")
     print(f"結果出力先: {args.output}")
     test_cases = parse_test_set("qa_test_set.txt")
-    rag_chain = get_rag_chain(args.db_path)
+    rag_chain, retriever = get_rag_chain(args.db_path)
     eval_llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0)
     
     results = []
@@ -171,8 +181,15 @@ def main():
         max_retries = 2
         for attempt in range(max_retries):
             try:
-                response = rag_chain.invoke({"input": case['question']})
-                time.sleep(5)  # Rate limit protection
+                # リトリーバーでドキュメントを取得
+                retrieved_docs = retriever.invoke(case['question'])
+                response_text = rag_chain.invoke(case['question'])
+                # 互換性のためのレスポンス形式
+                response = {
+                    "answer": response_text,
+                    "context": retrieved_docs
+                }
+                time.sleep(3)  # Rate limit protection
 
                 gen_score, gen_reason = evaluate_generation(
                     eval_llm,
@@ -180,7 +197,7 @@ def main():
                     case['expected_answer'],
                     response['answer']
                 )
-                time.sleep(5)  # Rate limit protection
+                time.sleep(3)  # Rate limit protection
 
                 ret_score, ret_reason = evaluate_retrieval(
                     case['expected_evidence'],
@@ -204,9 +221,15 @@ def main():
 
             except Exception as e:
                 print(f"Error evaluating {case['id']} (attempt {attempt + 1}/{max_retries}): {e}")
-                if "RESOURCE_EXHAUSTED" in str(e):
-                    wait_sec = 60
+                if "RESOURCE_EXHAUSTED" in str(e) or "429" in str(e):
+                    wait_sec = min(60 * (attempt + 1), 300)  # Progressive backoff, max 5 minutes
                     print(f"Rate limit reached. Sleeping for {wait_sec}s...")
+                    time.sleep(wait_sec)
+                    if attempt + 1 == max_retries:
+                        print(f"  -> {case['id']} をスキップします。")
+                elif "timeout" in str(e).lower() or "connection" in str(e).lower():
+                    wait_sec = 30
+                    print(f"Connection issue. Sleeping for {wait_sec}s...")
                     time.sleep(wait_sec)
                     if attempt + 1 == max_retries:
                         print(f"  -> {case['id']} をスキップします。")
